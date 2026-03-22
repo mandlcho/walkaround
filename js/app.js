@@ -1,6 +1,7 @@
 import { analyzeFloorPlan } from './floorplan.js';
 import { buildScene } from './scene.js';
 import { setupControls } from './controls.js';
+import { WALL_HEIGHT } from './utils.js';
 import { CameraAnimator } from './camera-animator.js';
 import { Navigation } from './navigation.js';
 import { ViewMode, MODES } from './viewmode.js';
@@ -148,9 +149,14 @@ function startWalkthrough() {
       orbitControls.update();
     }
 
-    // Keep point light with camera
+    // Keep lights with camera
     sceneData.pointLight.position.copy(sceneData.camera.position);
-    sceneData.renderer.render(sceneData.scene, sceneData.camera);
+    sceneData.fillLight.position.set(
+      sceneData.camera.position.x,
+      WALL_HEIGHT - 0.3,
+      sceneData.camera.position.z
+    );
+    sceneData.composer.render();
 
     // Minimap only in first person
     if (viewMode.currentMode === MODES.FIRST_PERSON) {
