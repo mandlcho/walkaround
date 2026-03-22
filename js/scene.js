@@ -152,25 +152,35 @@ export function buildScene(floorData, canvas) {
   }
 
   // --- Walls ---
+  const WALL_OVERLAP = 0.02; // meters — extend each end to cover micro-gaps
   for (const wall of floorData.walls) {
     const [x1, z1] = wall.start;
     const [x2, z2] = wall.end;
     const length = Math.hypot(x2 - x1, z2 - z1);
     if (length < 0.01) continue;
 
-    const wallGeo = new THREE.PlaneGeometry(length, WALL_HEIGHT);
+    // Extend the wall slightly past each endpoint to seal micro-gaps
+    const ux = (x2 - x1) / length;
+    const uz = (z2 - z1) / length;
+    const ex1 = x1 - ux * WALL_OVERLAP;
+    const ez1 = z1 - uz * WALL_OVERLAP;
+    const ex2 = x2 + ux * WALL_OVERLAP;
+    const ez2 = z2 + uz * WALL_OVERLAP;
+    const extendedLength = length + WALL_OVERLAP * 2;
+
+    const wallGeo = new THREE.PlaneGeometry(extendedLength, WALL_HEIGHT);
     const wallMesh = new THREE.Mesh(wallGeo, wallMat);
 
-    const mx = (x1 + x2) / 2;
-    const mz = (z1 + z2) / 2;
+    const mx = (ex1 + ex2) / 2;
+    const mz = (ez1 + ez2) / 2;
     wallMesh.position.set(mx, WALL_HEIGHT / 2, mz);
 
-    const angle = Math.atan2(z2 - z1, x2 - x1);
+    const angle = Math.atan2(ez2 - ez1, ex2 - ex1);
     wallMesh.rotation.y = -angle;
 
     const center = findNearestRoomCenter(mx, mz);
     if (center) {
-      const nx = -(z2 - z1), nz = (x2 - x1);
+      const nx = -(ez2 - ez1), nz = (ex2 - ex1);
       if (nx * (center[0] - mx) + nz * (center[1] - mz) < 0) {
         wallMesh.rotation.y = -angle + Math.PI;
       }
@@ -181,9 +191,9 @@ export function buildScene(floorData, canvas) {
     scene.add(wallMesh);
     wallMeshes.push(wallMesh);
 
-    // Baseboard
-    if (length > 0.15) {
-      const bbGeo = new THREE.BoxGeometry(length, 0.1, 0.018);
+    // Baseboard (also extended to match wall)
+    if (extendedLength > 0.15) {
+      const bbGeo = new THREE.BoxGeometry(extendedLength, 0.1, 0.018);
       const bb = new THREE.Mesh(bbGeo, baseboardMat);
       bb.position.set(mx, 0.05, mz);
       bb.rotation.y = -angle;
@@ -191,8 +201,8 @@ export function buildScene(floorData, canvas) {
       bb.receiveShadow = true;
       scene.add(bb);
 
-      // Crown molding at ceiling
-      const cmGeo = new THREE.BoxGeometry(length, 0.06, 0.012);
+      // Crown molding at ceiling (also extended)
+      const cmGeo = new THREE.BoxGeometry(extendedLength, 0.06, 0.012);
       const cm = new THREE.Mesh(cmGeo, crownMat);
       cm.position.set(mx, WALL_HEIGHT - 0.03, mz);
       cm.rotation.y = -angle;

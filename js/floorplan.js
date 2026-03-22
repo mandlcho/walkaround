@@ -2,7 +2,7 @@ import {
   MAX_IMAGE_SIZE, MIN_ROOM_RATIO,
   PX_TO_METERS, RDP_EPSILON, AXIS_SNAP_ANGLE,
   DOOR_MIN_WIDTH, DOOR_MAX_WIDTH,
-  rdpSimplify, snapToAxis
+  rdpSimplify, snapToAxis, pointInPolygon
 } from './utils.js';
 
 export async function analyzeFloorPlan(image, progressCanvas, onProgress) {
@@ -243,12 +243,51 @@ export async function analyzeFloorPlan(image, progressCanvas, onProgress) {
   }
   const doorSet = new Set();
 
-  for (const room of result.rooms) {
+  // Collect all room polygons for exterior edge detection
+  const allPolygons = result.rooms.map(r => r.polygon);
+
+  for (let ri = 0; ri < result.rooms.length; ri++) {
+    const room = result.rooms[ri];
     const poly = room.polygon;
     for (let i = 0; i < poly.length; i++) {
       const j = (i + 1) % poly.length;
       const edgeStart = poly[i];
       const edgeEnd = poly[j];
+
+      // --- Exterior edge detection ---
+      // Compute the outward normal (away from this room's center)
+      const emx = (edgeStart[0] + edgeEnd[0]) / 2;
+      const emy = (edgeStart[1] + edgeEnd[1]) / 2;
+      const edx = edgeEnd[0] - edgeStart[0];
+      const edy = edgeEnd[1] - edgeStart[1];
+      const eLen = Math.hypot(edx, edy);
+      if (eLen < 0.01) continue;
+      // Two candidate perpendicular directions
+      let nx = -edy / eLen;
+      let ny = edx / eLen;
+      // Pick the direction pointing away from this room's center
+      const toCenterX = room.center[0] - emx;
+      const toCenterY = room.center[1] - emy;
+      if (nx * toCenterX + ny * toCenterY > 0) {
+        // Normal points toward center, flip it to point outward
+        nx = -nx;
+        ny = -ny;
+      }
+      // Sample a point slightly outside the edge in the outward direction
+      const probeDistance = 0.15; // meters
+      const probeX = emx + nx * probeDistance;
+      const probeY = emy + ny * probeDistance;
+      // Check if this outward point falls inside any OTHER room's polygon
+      let hasNeighbor = false;
+      for (let oi = 0; oi < allPolygons.length; oi++) {
+        if (oi === ri) continue; // skip this room
+        if (pointInPolygon(probeX, probeY, allPolygons[oi])) {
+          hasNeighbor = true;
+          break;
+        }
+      }
+      // If no neighboring room on the other side, this is an exterior edge — skip it
+      if (!hasNeighbor) continue;
 
       const segments = classifyEdge(edgeStart, edgeEnd, binary, w, h);
       for (const seg of segments) {

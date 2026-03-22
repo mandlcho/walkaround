@@ -1,3 +1,4 @@
+import * as THREE from 'three';
 import { analyzeFloorPlan } from './floorplan.js';
 import { buildScene } from './scene.js';
 import { setupControls } from './controls.js';
@@ -6,6 +7,8 @@ import { CameraAnimator } from './camera-animator.js';
 import { Navigation } from './navigation.js';
 import { ViewMode, MODES } from './viewmode.js';
 import { Toolbar } from './toolbar.js';
+import { PanoramaViewer } from './panorama.js';
+import { PanoramaUploadUI } from './panorama-upload.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 // --- DOM ---
@@ -33,6 +36,8 @@ let navigation = null;
 let viewMode = null;
 let toolbar = null;
 let orbitControls = null;
+let panoramaViewer = null;
+let panoramaUploadUI = null;
 
 // --- Screen transitions ---
 function showScreen(name) {
@@ -129,9 +134,45 @@ function startWalkthrough() {
 
   toolbar = new Toolbar(screens.walkthrough, viewMode);
 
-  // Toggle minimap visibility with view mode
+  // --- Panorama system ---
+  panoramaViewer = new PanoramaViewer(sceneData.scene, sceneData.camera);
+  panoramaUploadUI = new PanoramaUploadUI(screens.walkthrough, floorData.rooms);
+
+  panoramaUploadUI.onPanoramaAdded = async (file, pos) => {
+    const position = new THREE.Vector3(pos.x, pos.y, pos.z);
+    const index = await panoramaViewer.addPanorama(file, position);
+    // If this is the first panorama, enable and show it
+    if (panoramaViewer.panoramas.length === 1 && viewMode.currentMode === MODES.FIRST_PERSON) {
+      panoramaViewer.enable();
+      panoramaViewer.goTo(0);
+    }
+  };
+
+  // Wire toolbar 360 button to open upload panel
+  toolbar.onPanoramaClick = () => {
+    panoramaUploadUI.show();
+  };
+
+  // When navigating, transition to nearest panorama
+  navigation.onNavigate = (targetPos) => {
+    if (panoramaViewer.hasPanoramas()) {
+      const nearest = panoramaViewer.findNearest(targetPos);
+      if (nearest >= 0) {
+        panoramaViewer.goTo(nearest);
+      }
+    }
+  };
+
+  // Toggle minimap visibility with view mode, and panorama visibility
   viewMode.onChange((mode) => {
     minimapCanvas.style.display = mode === MODES.FIRST_PERSON ? 'block' : 'none';
+    if (panoramaViewer.hasPanoramas()) {
+      if (mode === MODES.FIRST_PERSON) {
+        panoramaViewer.enable();
+      } else {
+        panoramaViewer.disable();
+      }
+    }
   });
 
   // Render loop
@@ -156,10 +197,16 @@ function startWalkthrough() {
       WALL_HEIGHT - 0.3,
       sceneData.camera.position.z
     );
+    // Update panorama crossfade
+    if (panoramaViewer) {
+      panoramaViewer.update(dt);
+    }
+
     sceneData.composer.render();
 
-    // Minimap only in first person
+    // Minimap and nav dot updates only in first person
     if (viewMode.currentMode === MODES.FIRST_PERSON) {
+      navigation.update(dt);
       drawMinimap();
     }
   }
@@ -242,6 +289,8 @@ btnExit.addEventListener('click', () => {
   if (controls) controls.destroy();
   if (navigation) navigation.destroy();
   if (toolbar) toolbar.destroy();
+  if (panoramaViewer) panoramaViewer.destroy();
+  if (panoramaUploadUI) panoramaUploadUI.destroy();
   if (orbitControls) orbitControls.dispose();
   if (sceneData) {
     sceneData.renderer.dispose();
@@ -255,6 +304,8 @@ btnExit.addEventListener('click', () => {
   navigation = null;
   viewMode = null;
   toolbar = null;
+  panoramaViewer = null;
+  panoramaUploadUI = null;
   orbitControls = null;
   fileInput.value = '';
   showScreen('upload');

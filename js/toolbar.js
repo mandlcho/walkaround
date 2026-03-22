@@ -28,12 +28,27 @@ export class Toolbar {
         </svg>
         <span>Floor Plan</span>
       </button>
+      <div class="toolbar-divider"></div>
+      <button class="toolbar-btn" data-action="panorama" title="360 Photos (4)">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"/>
+          <ellipse cx="12" cy="12" rx="10" ry="4"/>
+          <line x1="12" y1="2" x2="12" y2="22"/>
+        </svg>
+        <span>360&deg;</span>
+      </button>
     `;
     container.appendChild(this.el);
+
+    this._onPanoramaClick = null;
 
     this.el.querySelectorAll('.toolbar-btn').forEach(btn => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
+        if (btn.dataset.action === 'panorama') {
+          if (this._onPanoramaClick) this._onPanoramaClick();
+          return;
+        }
         viewMode.switchMode(btn.dataset.mode);
       });
     });
@@ -48,8 +63,13 @@ export class Toolbar {
       if (e.code === 'Digit1') viewMode.switchMode('firstperson');
       if (e.code === 'Digit2') viewMode.switchMode('dollhouse');
       if (e.code === 'Digit3') viewMode.switchMode('floorplan');
+      if (e.code === 'Digit4' && this._onPanoramaClick) this._onPanoramaClick();
     };
     document.addEventListener('keydown', this._keyHandler);
+  }
+
+  set onPanoramaClick(fn) {
+    this._onPanoramaClick = fn;
   }
 
   destroy() {
