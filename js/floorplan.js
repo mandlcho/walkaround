@@ -215,7 +215,24 @@ export async function analyzeFloorPlan(image, progressCanvas, onProgress) {
   onProgress('Detecting doors...', 0.80);
   const doorRegions = detectDoorsBetweenRooms(binary, closed, labels, rooms, w, h);
 
-  // Add walls for each room polygon, splitting around detected doors
+  // Add walls for each room polygon, splitting around detected doors.
+  // Deduplicate shared edges between adjacent rooms so each wall is only emitted once.
+  const wallSet = new Set();
+  function wallKey(s, e) {
+    // Round to 3 decimals to catch near-identical edges
+    const r = v => Math.round(v * 1000);
+    const a = `${r(s[0])},${r(s[1])},${r(e[0])},${r(e[1])}`;
+    const b = `${r(e[0])},${r(e[1])},${r(s[0])},${r(s[1])}`;
+    return a < b ? a : b; // canonical order
+  }
+  function addWallIfNew(start, end) {
+    const key = wallKey(start, end);
+    if (wallSet.has(key)) return;
+    wallSet.add(key);
+    result.walls.push({ start, end });
+  }
+  const doorSet = new Set();
+
   for (const room of result.rooms) {
     const poly = room.polygon;
     for (let i = 0; i < poly.length; i++) {
@@ -227,14 +244,18 @@ export async function analyzeFloorPlan(image, progressCanvas, onProgress) {
       const edgeDoors = findDoorsOnEdge(wallStart, wallEnd, doorRegions);
       if (edgeDoors.length > 0) {
         for (const door of edgeDoors) {
-          result.doors.push(door);
+          const dk = wallKey(door.start, door.end);
+          if (!doorSet.has(dk)) {
+            doorSet.add(dk);
+            result.doors.push(door);
+          }
         }
         const segments = splitWallAroundDoors(wallStart, wallEnd, edgeDoors);
         for (const seg of segments) {
-          result.walls.push({ start: seg.start, end: seg.end });
+          addWallIfNew(seg.start, seg.end);
         }
       } else {
-        result.walls.push({ start: wallStart, end: wallEnd });
+        addWallIfNew(wallStart, wallEnd);
       }
     }
   }

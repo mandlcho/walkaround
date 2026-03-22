@@ -19,7 +19,6 @@ export function setupControls(camera, wallMeshes, joystickZone) {
   const _right = new THREE.Vector3();
   const _moveDir = new THREE.Vector3();
   const _origin = new THREE.Vector3();
-  const _rayDir = new THREE.Vector3();
   const _upAxis = new THREE.Vector3(0, 1, 0);
 
   // --- Mobile: nipple.js joystick ---
@@ -127,34 +126,39 @@ export function setupControls(camera, wallMeshes, joystickZone) {
     _moveDir.addScaledVector(_forward, state.moveZ * speed);
     _moveDir.addScaledVector(_right, state.moveX * speed);
 
-    if (_moveDir.length() < 0.0001) return;
+    const moveLen = _moveDir.length();
+    if (moveLen < 0.0001) return;
 
-    // Collision detection with 3 raycasts
+    // Sliding collision — try full move, then each axis independently
     _origin.copy(camera.position);
     _origin.y = CAMERA_HEIGHT * 0.5;
-    const angles = [0, Math.PI / 6, -Math.PI / 6];
-    const moveLen = _moveDir.length();
-    _moveDir.normalize(); // normalize in place for ray direction
 
-    let blocked = false;
-    for (const angle of angles) {
-      _rayDir.copy(_moveDir).applyAxisAngle(_upAxis, angle);
-      raycaster.set(_origin, _rayDir);
-      raycaster.far = COLLISION_DIST;
-      const hits = raycaster.intersectObjects(wallMeshes);
-      if (hits.length > 0) {
-        blocked = true;
-        break;
+    // Try full movement first
+    if (!isBlocked(_origin, _moveDir, moveLen, wallMeshes, raycaster)) {
+      camera.position.add(_moveDir);
+    } else {
+      // Try sliding along X axis only
+      const slideX = new THREE.Vector3(_moveDir.x, 0, 0);
+      const slideXLen = slideX.length();
+      if (slideXLen > 0.0001 && !isBlocked(_origin, slideX, slideXLen, wallMeshes, raycaster)) {
+        camera.position.add(slideX);
+      }
+      // Try sliding along Z axis only
+      const slideZ = new THREE.Vector3(0, 0, _moveDir.z);
+      const slideZLen = slideZ.length();
+      if (slideZLen > 0.0001 && !isBlocked(_origin, slideZ, slideZLen, wallMeshes, raycaster)) {
+        camera.position.add(slideZ);
       }
     }
+    camera.position.y = CAMERA_HEIGHT;
+  }
 
-    // Restore moveDir magnitude for position update
-    _moveDir.multiplyScalar(moveLen);
-
-    if (!blocked) {
-      camera.position.add(_moveDir);
-      camera.position.y = CAMERA_HEIGHT;
-    }
+  function isBlocked(origin, dir, len, walls, rc) {
+    const d = dir.clone().normalize();
+    rc.set(origin, d);
+    rc.far = COLLISION_DIST + len;
+    const hits = rc.intersectObjects(walls);
+    return hits.length > 0 && hits[0].distance < COLLISION_DIST + len;
   }
 
   function destroy() {

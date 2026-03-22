@@ -125,8 +125,8 @@ export function buildScene(floorData, canvas) {
     }
 
     // Door frame posts (two thin pillars on each side)
-    const frameW = 0.06; // 6cm frame width
-    const frameD = 0.08;
+    const frameW = 0.04; // 4cm frame width
+    const frameD = 0.04;
     const postGeo = new THREE.BoxGeometry(frameW, DOOR_HEIGHT, frameD);
     const dx = Math.cos(angle);
     const dz = Math.sin(angle);

@@ -4,7 +4,7 @@ export const PX_TO_METERS = 0.05;        // 1 pixel = 5cm
 export const MOVE_SPEED = 3.0;           // m/s
 export const LOOK_SENSITIVITY = 0.003;   // rad/px
 export const PITCH_LIMIT = Math.PI * (80 / 180); // ±80°
-export const COLLISION_DIST = 0.3;       // meters
+export const COLLISION_DIST = 0.2;       // meters
 export const CAMERA_HEIGHT = 1.6;        // meters (eye level)
 export const MAX_IMAGE_SIZE = 800;       // px
 export const MIN_ROOM_RATIO = 0.01;      // min room area as fraction of image
