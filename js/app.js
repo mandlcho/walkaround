@@ -1,7 +1,11 @@
 import { analyzeFloorPlan } from './floorplan.js';
 import { buildScene } from './scene.js';
 import { setupControls } from './controls.js';
-import { PX_TO_METERS } from './utils.js';
+import { CameraAnimator } from './camera-animator.js';
+import { Navigation } from './navigation.js';
+import { ViewMode, MODES } from './viewmode.js';
+import { Toolbar } from './toolbar.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 // --- DOM ---
 const screens = {
@@ -15,7 +19,6 @@ const procCanvas = document.getElementById('processing-canvas');
 const procText = document.getElementById('processing-text');
 const progressBar = document.getElementById('progress-bar');
 const threeCanvas = document.getElementById('three-canvas');
-const joystickZone = document.getElementById('joystick-zone');
 const minimapCanvas = document.getElementById('minimap-canvas');
 const btnExit = document.getElementById('btn-exit');
 
@@ -24,6 +27,11 @@ let sceneData = null;
 let controls = null;
 let floorData = null;
 let animId = null;
+let cameraAnimator = null;
+let navigation = null;
+let viewMode = null;
+let toolbar = null;
+let orbitControls = null;
 
 // --- Screen transitions ---
 function showScreen(name) {
@@ -35,6 +43,10 @@ function showScreen(name) {
 // --- Upload handlers ---
 fileInput.addEventListener('change', (e) => {
   if (e.target.files[0]) handleFile(e.target.files[0]);
+});
+
+dropZone.addEventListener('click', () => {
+  fileInput.click();
 });
 
 dropZone.addEventListener('dragover', (e) => {
@@ -80,7 +92,6 @@ async function startProcessing(image) {
       return;
     }
 
-    // Brief delay so user can see the result
     await new Promise(r => setTimeout(r, 800));
     startWalkthrough();
   } catch (err) {
@@ -95,37 +106,68 @@ function startWalkthrough() {
   showScreen('walkthrough');
 
   sceneData = buildScene(floorData, threeCanvas);
-  controls = setupControls(sceneData.camera, sceneData.wallMeshes, joystickZone);
+  cameraAnimator = new CameraAnimator(sceneData.camera);
+  controls = setupControls(sceneData.camera, sceneData.wallMeshes);
 
-  // Start render loop
+  orbitControls = new OrbitControls(sceneData.camera, threeCanvas);
+  orbitControls.enabled = false;
+  orbitControls.enableDamping = true;
+  orbitControls.dampingFactor = 0.08;
+
+  navigation = new Navigation(sceneData.scene, sceneData.camera, floorData, cameraAnimator, controls);
+
+  viewMode = new ViewMode({
+    camera: sceneData.camera,
+    floorData,
+    controls,
+    navigation,
+    cameraAnimator,
+    orbitControls,
+    sceneData
+  });
+
+  toolbar = new Toolbar(screens.walkthrough, viewMode);
+
+  // Toggle minimap visibility with view mode
+  viewMode.onChange((mode) => {
+    minimapCanvas.style.display = mode === MODES.FIRST_PERSON ? 'block' : 'none';
+  });
+
+  // Render loop
   let lastTime = performance.now();
   function animate(time) {
     animId = requestAnimationFrame(animate);
-    const dt = Math.min((time - lastTime) / 1000, 0.1); // cap delta
+    const dt = Math.min((time - lastTime) / 1000, 0.1);
     lastTime = time;
 
-    controls.update(dt);
+    if (cameraAnimator.isAnimating()) {
+      cameraAnimator.update(dt);
+    } else if (viewMode.currentMode === MODES.FIRST_PERSON) {
+      controls.update(dt);
+    } else {
+      orbitControls.update();
+    }
 
     // Keep point light with camera
     sceneData.pointLight.position.copy(sceneData.camera.position);
-
     sceneData.renderer.render(sceneData.scene, sceneData.camera);
 
-    // Update minimap
-    drawMinimap();
+    // Minimap only in first person
+    if (viewMode.currentMode === MODES.FIRST_PERSON) {
+      drawMinimap();
+    }
   }
   animId = requestAnimationFrame(animate);
 }
 
 // --- Minimap ---
-// Set minimap canvas size once
 const minimapSize = 120;
 minimapCanvas.width = minimapSize;
 minimapCanvas.height = minimapSize;
 const minimapCtx = minimapCanvas.getContext('2d');
 
 function drawMinimap() {
-  if (!floorData || !sceneData) return;
+  if (!floorData || !sceneData || !controls) return;
   const size = minimapSize;
   const ctx = minimapCtx;
 
@@ -165,7 +207,7 @@ function drawMinimap() {
     }
   }
 
-  // Draw player position
+  // Player position
   const cam = sceneData.camera.position;
   const px = offX + cam.x * scale;
   const py = offY + cam.z * scale;
@@ -192,6 +234,9 @@ function drawMinimap() {
 btnExit.addEventListener('click', () => {
   if (animId) cancelAnimationFrame(animId);
   if (controls) controls.destroy();
+  if (navigation) navigation.destroy();
+  if (toolbar) toolbar.destroy();
+  if (orbitControls) orbitControls.dispose();
   if (sceneData) {
     sceneData.renderer.dispose();
     window.removeEventListener('resize', sceneData.onResize);
@@ -200,6 +245,11 @@ btnExit.addEventListener('click', () => {
   controls = null;
   floorData = null;
   animId = null;
+  cameraAnimator = null;
+  navigation = null;
+  viewMode = null;
+  toolbar = null;
+  orbitControls = null;
   fileInput.value = '';
   showScreen('upload');
 });

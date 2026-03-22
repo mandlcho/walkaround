@@ -1,19 +1,17 @@
 import * as THREE from 'three';
 import { MOVE_SPEED, LOOK_SENSITIVITY, PITCH_LIMIT, COLLISION_DIST, CAMERA_HEIGHT, clamp } from './utils.js';
 
-export function setupControls(camera, wallMeshes, joystickZone) {
+export function setupControls(camera, wallMeshes) {
   const state = {
-    moveX: 0,     // strafe
-    moveZ: 0,     // forward/back
-    yaw: 0,       // horizontal angle
-    pitch: 0,     // vertical angle
-    active: true
+    moveX: 0,
+    moveZ: 0,
+    yaw: 0,
+    pitch: 0,
+    active: true,
+    enabled: true
   };
 
   const raycaster = new THREE.Raycaster();
-  const isMobile = 'ontouchstart' in window && window.innerWidth < 1024;
-
-  // Reusable objects to avoid per-frame allocations
   const _euler = new THREE.Euler(0, 0, 0, 'YXZ');
   const _forward = new THREE.Vector3();
   const _right = new THREE.Vector3();
@@ -21,103 +19,90 @@ export function setupControls(camera, wallMeshes, joystickZone) {
   const _origin = new THREE.Vector3();
   const _upAxis = new THREE.Vector3(0, 1, 0);
 
-  // --- Mobile: nipple.js joystick ---
-  let joystick = null;
-  if (isMobile && typeof nipplejs !== 'undefined') {
-    joystick = nipplejs.create({
-      zone: joystickZone,
-      mode: 'static',
-      position: { left: '70px', bottom: '70px' },
-      size: 120,
-      color: 'rgba(108, 99, 255, 0.5)'
-    });
+  const canvas = document.getElementById('three-canvas');
 
-    joystick.on('move', (evt, data) => {
-      if (!data.vector) return;
-      state.moveX = data.vector.x;
-      state.moveZ = -data.vector.y; // forward = negative y in nipple
-    });
+  // --- Drag state for click vs drag disambiguation ---
+  let mouseDragDist = 0;
+  let touchDragDist = 0;
+  let isDragging = false;
+  let lastMouseX = 0, lastMouseY = 0;
 
-    joystick.on('end', () => {
-      state.moveX = 0;
-      state.moveZ = 0;
-    });
+  // --- Desktop: mouse drag to look ---
+  canvas.addEventListener('mousedown', (e) => {
+    isDragging = true;
+    mouseDragDist = 0;
+    lastMouseX = e.clientX;
+    lastMouseY = e.clientY;
+  });
 
-    // Touch look (right side of screen)
-    let touchId = null;
-    let lastX = 0, lastY = 0;
+  window.addEventListener('mousemove', (e) => {
+    if (!isDragging || !state.enabled) return;
+    const dx = e.clientX - lastMouseX;
+    const dy = e.clientY - lastMouseY;
+    lastMouseX = e.clientX;
+    lastMouseY = e.clientY;
+    mouseDragDist += Math.abs(dx) + Math.abs(dy);
+    state.yaw -= dx * LOOK_SENSITIVITY;
+    state.pitch = clamp(state.pitch - dy * LOOK_SENSITIVITY, -PITCH_LIMIT, PITCH_LIMIT);
+  });
 
-    document.addEventListener('touchstart', (e) => {
-      for (const touch of e.changedTouches) {
-        // Only handle touches on the right half
-        if (touch.clientX > window.innerWidth * 0.35 && touchId === null) {
-          touchId = touch.identifier;
-          lastX = touch.clientX;
-          lastY = touch.clientY;
-        }
-      }
-    }, { passive: true });
+  window.addEventListener('mouseup', () => { isDragging = false; });
 
-    document.addEventListener('touchmove', (e) => {
-      for (const touch of e.changedTouches) {
-        if (touch.identifier === touchId) {
-          const dx = touch.clientX - lastX;
-          const dy = touch.clientY - lastY;
-          state.yaw -= dx * LOOK_SENSITIVITY;
-          state.pitch = clamp(state.pitch - dy * LOOK_SENSITIVITY, -PITCH_LIMIT, PITCH_LIMIT);
-          lastX = touch.clientX;
-          lastY = touch.clientY;
-        }
-      }
-    }, { passive: true });
-
-    document.addEventListener('touchend', (e) => {
-      for (const touch of e.changedTouches) {
-        if (touch.identifier === touchId) {
-          touchId = null;
-        }
-      }
-    }, { passive: true });
-  }
-
-  // --- Desktop: WASD + pointer lock ---
+  // --- Desktop: WASD / Arrow keys ---
   const keys = {};
   document.addEventListener('keydown', (e) => { keys[e.code] = true; });
   document.addEventListener('keyup', (e) => { keys[e.code] = false; });
 
-  if (!isMobile) {
-    const threeCanvas = document.getElementById('three-canvas');
-    threeCanvas.addEventListener('click', () => {
-      threeCanvas.requestPointerLock();
-    });
+  // --- Mobile: touch drag to look ---
+  let touchId = null;
+  let lastTX = 0, lastTY = 0;
 
-    document.addEventListener('mousemove', (e) => {
-      if (document.pointerLockElement) {
-        state.yaw -= e.movementX * LOOK_SENSITIVITY;
-        state.pitch = clamp(state.pitch - e.movementY * LOOK_SENSITIVITY, -PITCH_LIMIT, PITCH_LIMIT);
+  canvas.addEventListener('touchstart', (e) => {
+    if (!state.enabled || touchId !== null) return;
+    const t = e.changedTouches[0];
+    touchId = t.identifier;
+    lastTX = t.clientX;
+    lastTY = t.clientY;
+    touchDragDist = 0;
+  }, { passive: true });
+
+  canvas.addEventListener('touchmove', (e) => {
+    if (!state.enabled) return;
+    for (const t of e.changedTouches) {
+      if (t.identifier === touchId) {
+        const dx = t.clientX - lastTX;
+        const dy = t.clientY - lastTY;
+        touchDragDist += Math.abs(dx) + Math.abs(dy);
+        state.yaw -= dx * LOOK_SENSITIVITY;
+        state.pitch = clamp(state.pitch - dy * LOOK_SENSITIVITY, -PITCH_LIMIT, PITCH_LIMIT);
+        lastTX = t.clientX;
+        lastTY = t.clientY;
       }
-    });
-  }
-
-  // --- Update function (called each frame) ---
-  function update(dt) {
-    if (!state.active) return;
-
-    // Desktop input
-    if (!isMobile) {
-      state.moveZ = 0;
-      state.moveX = 0;
-      if (keys['KeyW'] || keys['ArrowUp']) state.moveZ = 1;
-      if (keys['KeyS'] || keys['ArrowDown']) state.moveZ = -1;
-      if (keys['KeyA'] || keys['ArrowLeft']) state.moveX = -1;
-      if (keys['KeyD'] || keys['ArrowRight']) state.moveX = 1;
     }
+  }, { passive: true });
+
+  canvas.addEventListener('touchend', (e) => {
+    for (const t of e.changedTouches) {
+      if (t.identifier === touchId) touchId = null;
+    }
+  }, { passive: true });
+
+  // --- Update (called each frame in first-person mode) ---
+  function update(dt) {
+    if (!state.active || !state.enabled) return;
 
     // Apply camera rotation
     _euler.set(state.pitch, state.yaw, 0);
     camera.quaternion.setFromEuler(_euler);
 
-    // Movement direction relative to camera yaw
+    // WASD input
+    state.moveZ = 0;
+    state.moveX = 0;
+    if (keys['KeyW'] || keys['ArrowUp']) state.moveZ = 1;
+    if (keys['KeyS'] || keys['ArrowDown']) state.moveZ = -1;
+    if (keys['KeyA'] || keys['ArrowLeft']) state.moveX = -1;
+    if (keys['KeyD'] || keys['ArrowRight']) state.moveX = 1;
+
     const speed = MOVE_SPEED * dt;
     _forward.set(0, 0, -1).applyAxisAngle(_upAxis, state.yaw);
     _right.set(1, 0, 0).applyAxisAngle(_upAxis, state.yaw);
@@ -129,21 +114,18 @@ export function setupControls(camera, wallMeshes, joystickZone) {
     const moveLen = _moveDir.length();
     if (moveLen < 0.0001) return;
 
-    // Sliding collision — try full move, then each axis independently
+    // Sliding collision
     _origin.copy(camera.position);
     _origin.y = CAMERA_HEIGHT * 0.5;
 
-    // Try full movement first
     if (!isBlocked(_origin, _moveDir, moveLen, wallMeshes, raycaster)) {
       camera.position.add(_moveDir);
     } else {
-      // Try sliding along X axis only
       const slideX = new THREE.Vector3(_moveDir.x, 0, 0);
       const slideXLen = slideX.length();
       if (slideXLen > 0.0001 && !isBlocked(_origin, slideX, slideXLen, wallMeshes, raycaster)) {
         camera.position.add(slideX);
       }
-      // Try sliding along Z axis only
       const slideZ = new THREE.Vector3(0, 0, _moveDir.z);
       const slideZLen = slideZ.length();
       if (slideZLen > 0.0001 && !isBlocked(_origin, slideZ, slideZLen, wallMeshes, raycaster)) {
@@ -161,11 +143,13 @@ export function setupControls(camera, wallMeshes, joystickZone) {
     return hits.length > 0 && hits[0].distance < COLLISION_DIST + len;
   }
 
-  function destroy() {
-    state.active = false;
-    if (joystick) joystick.destroy();
-    document.exitPointerLock?.();
+  function wasDrag() {
+    return mouseDragDist > 5 || touchDragDist > 15;
   }
 
-  return { update, destroy, state };
+  function enable() { state.enabled = true; }
+  function disable() { state.enabled = false; }
+  function destroy() { state.active = false; }
+
+  return { update, enable, disable, destroy, state, wasDrag };
 }

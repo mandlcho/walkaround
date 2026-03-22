@@ -29,8 +29,9 @@ export function buildScene(floorData, canvas) {
   const wallMat = createWallMaterial();
   const doorFrameMat = new THREE.MeshLambertMaterial({ color: 0x5c4033, side: THREE.DoubleSide });
 
-  // Collect wall meshes for collision (doors excluded)
+  // Collect meshes
   const wallMeshes = [];
+  const ceilingMeshes = [];
 
   // Build geometry per room
   for (const room of floorData.rooms) {
@@ -57,6 +58,7 @@ export function buildScene(floorData, canvas) {
     ceiling.rotation.x = -Math.PI / 2;
     ceiling.position.y = WALL_HEIGHT;
     scene.add(ceiling);
+    ceilingMeshes.push(ceiling);
   }
 
   // Helper to find nearest room center for inward-facing calculation
@@ -165,7 +167,7 @@ export function buildScene(floorData, canvas) {
   };
   window.addEventListener('resize', onResize);
 
-  return { renderer, scene, camera, pointLight, wallMeshes, onResize };
+  return { renderer, scene, camera, pointLight, wallMeshes, ceilingMeshes, onResize };
 }
 
 function createFloorMaterial() {

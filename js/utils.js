@@ -13,6 +13,9 @@ export const AXIS_SNAP_ANGLE = 10;       // degrees — snap near-axis edges
 export const DOOR_MIN_WIDTH = 0.4;       // meters — minimum door opening
 export const DOOR_MAX_WIDTH = 1.5;       // meters — maximum door opening
 export const DOOR_HEIGHT = 2.2;          // meters
+export const NAV_POINT_SPACING = 1.2;   // meters between nav dots
+export const TRANSITION_DURATION = 0.8; // seconds for click-to-move
+export const MODE_TRANSITION_DURATION = 1.2; // seconds for mode switches
 
 // Helpers
 export function clamp(val, min, max) {
@@ -51,6 +54,22 @@ export function rdpSimplify(points, epsilon) {
     return left.slice(0, -1).concat(right);
   }
   return [first, last];
+}
+
+export function easeInOutCubic(t) {
+  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}
+
+export function pointInPolygon(x, y, polygon) {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i][0], yi = polygon[i][1];
+    const xj = polygon[j][0], yj = polygon[j][1];
+    if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) {
+      inside = !inside;
+    }
+  }
+  return inside;
 }
 
 export function snapToAxis(points, angleDeg) {

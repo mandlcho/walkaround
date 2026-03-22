@@ -111,10 +111,25 @@ export async function analyzeFloorPlan(image, progressCanvas, onProgress) {
   ctx.putImageData(binData, 0, 0);
   await frame();
 
-  // Step 4: Morphological close (dilate then erode, 3x3)
-  onProgress('Cleaning up walls...', 0.35);
-  const dilated = morphOp(binary, w, h, 'dilate');
-  const closed = morphOp(dilated, w, h, 'erode');
+  // Step 4: Iterative morphological close — seal door-sized gaps
+  // Each 3x3 iteration closes 2px of gap; need enough to close DOOR_MAX_WIDTH
+  const closeIterations = Math.ceil(DOOR_MAX_WIDTH / PX_TO_METERS / 2);
+  let morphed = new Uint8Array(binary);
+  for (let i = 0; i < closeIterations; i++) {
+    morphed = morphOp(morphed, w, h, 'dilate');
+    if (i % 4 === 0) {
+      onProgress(`Sealing door gaps (${i + 1}/${closeIterations})...`, 0.30 + 0.07 * i / closeIterations);
+      await frame();
+    }
+  }
+  for (let i = 0; i < closeIterations; i++) {
+    morphed = morphOp(morphed, w, h, 'erode');
+    if (i % 4 === 0) {
+      onProgress(`Restoring walls (${i + 1}/${closeIterations})...`, 0.37 + 0.07 * i / closeIterations);
+      await frame();
+    }
+  }
+  const closed = morphed;
   await frame();
 
   // Step 5: BFS flood fill for rooms
@@ -209,21 +224,16 @@ export async function analyzeFloorPlan(image, progressCanvas, onProgress) {
     result.rooms.push({ polygon, center: [cx, cy], area });
   }
 
-  // Step 9: Detect doors between adjacent rooms
-  // Find wall pixels that separate two different rooms, then look for
-  // thin/gap regions in the original binary image (before morph close)
+  // Step 9: Classify each polygon edge as wall or door by sampling the
+  // original binary image. Where the binary has no wall pixels, it's a door.
   onProgress('Detecting doors...', 0.80);
-  const doorRegions = detectDoorsBetweenRooms(binary, closed, labels, rooms, w, h);
 
-  // Add walls for each room polygon, splitting around detected doors.
-  // Deduplicate shared edges between adjacent rooms so each wall is only emitted once.
   const wallSet = new Set();
   function wallKey(s, e) {
-    // Round to 3 decimals to catch near-identical edges
     const r = v => Math.round(v * 1000);
     const a = `${r(s[0])},${r(s[1])},${r(e[0])},${r(e[1])}`;
     const b = `${r(e[0])},${r(e[1])},${r(s[0])},${r(s[1])}`;
-    return a < b ? a : b; // canonical order
+    return a < b ? a : b;
   }
   function addWallIfNew(start, end) {
     const key = wallKey(start, end);
@@ -237,25 +247,20 @@ export async function analyzeFloorPlan(image, progressCanvas, onProgress) {
     const poly = room.polygon;
     for (let i = 0; i < poly.length; i++) {
       const j = (i + 1) % poly.length;
-      const wallStart = poly[i];
-      const wallEnd = poly[j];
+      const edgeStart = poly[i];
+      const edgeEnd = poly[j];
 
-      // Check if any detected doors overlap this edge
-      const edgeDoors = findDoorsOnEdge(wallStart, wallEnd, doorRegions);
-      if (edgeDoors.length > 0) {
-        for (const door of edgeDoors) {
-          const dk = wallKey(door.start, door.end);
+      const segments = classifyEdge(edgeStart, edgeEnd, binary, w, h);
+      for (const seg of segments) {
+        if (seg.type === 'door') {
+          const dk = wallKey(seg.start, seg.end);
           if (!doorSet.has(dk)) {
             doorSet.add(dk);
-            result.doors.push(door);
+            result.doors.push({ start: seg.start, end: seg.end, width: seg.width });
           }
-        }
-        const segments = splitWallAroundDoors(wallStart, wallEnd, edgeDoors);
-        for (const seg of segments) {
+        } else {
           addWallIfNew(seg.start, seg.end);
         }
-      } else {
-        addWallIfNew(wallStart, wallEnd);
       }
     }
   }
@@ -301,29 +306,20 @@ export async function analyzeFloorPlan(image, progressCanvas, onProgress) {
 function morphOp(data, w, h, op) {
   const out = new Uint8Array(w * h);
   const isWall = op === 'dilate' ? 1 : 0;
-  for (let y = 1; y < h - 1; y++) {
-    for (let x = 1; x < w - 1; x++) {
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
       let found = false;
-      outer:
-      for (let dy = -1; dy <= 1; dy++) {
-        for (let dx = -1; dx <= 1; dx++) {
-          if (data[(y + dy) * w + (x + dx)] === isWall) {
+      for (let dy = -1; dy <= 1 && !found; dy++) {
+        for (let dx = -1; dx <= 1 && !found; dx++) {
+          const ny = y + dy, nx = x + dx;
+          if (ny >= 0 && ny < h && nx >= 0 && nx < w &&
+              data[ny * w + nx] === isWall) {
             found = true;
-            break outer;
           }
         }
       }
       out[y * w + x] = found ? isWall : (1 - isWall);
     }
-  }
-  // Copy borders
-  for (let x = 0; x < w; x++) {
-    out[x] = data[x];
-    out[(h - 1) * w + x] = data[(h - 1) * w + x];
-  }
-  for (let y = 0; y < h; y++) {
-    out[y * w] = data[y * w];
-    out[y * w + w - 1] = data[y * w + w - 1];
   }
   return out;
 }
@@ -408,221 +404,86 @@ function traceContour(mask, w, h) {
   return contour;
 }
 
-function detectDoorsBetweenRooms(binary, closed, labels, rooms, w, h) {
-  // For each wall pixel in 'closed', check if it's adjacent to two different rooms.
-  // Then check if the original 'binary' has a gap (no wall) at that location —
-  // meaning the morph close sealed a door gap.
-  // Also detect thin wall regions (wall thickness ≤ a few pixels) between rooms.
-
-  const roomIds = new Set(rooms.map(r => r.id));
-  const searchRadius = 8;
-
-  // Step 1: Find all "door candidate" pixels — wall pixels in closed that
-  // have no wall in binary (gap sealed by morph), OR thin wall pixels
-  // adjacent to 2 different rooms
-  const doorPixels = new Uint8Array(w * h);
-
-  for (let y = 1; y < h - 1; y++) {
-    for (let x = 1; x < w - 1; x++) {
-      const idx = y * w + x;
-      if (closed[idx] !== 1) continue; // not a wall pixel
-
-      // Check if this was a gap sealed by morph close
-      const wasGap = binary[idx] === 0;
-
-      // Check if this is a thin wall between two rooms
-      const neighborRooms = new Set();
-      for (let dy = -searchRadius; dy <= searchRadius; dy++) {
-        for (let dx = -searchRadius; dx <= searchRadius; dx++) {
-          const ny = y + dy;
-          const nx = x + dx;
-          if (ny >= 0 && ny < h && nx >= 0 && nx < w) {
-            const lbl = labels[ny * w + nx];
-            if (lbl >= 0 && roomIds.has(lbl)) {
-              neighborRooms.add(lbl);
-            }
-          }
-        }
-      }
-
-      if (neighborRooms.size >= 2 && (wasGap || isThinWall(binary, w, h, x, y))) {
-        doorPixels[idx] = 1;
-      }
-    }
-  }
-
-  // Step 2: BFS to find connected clusters of door pixels
-  const doorLabels = new Int32Array(w * h).fill(-1);
-  const clusters = [];
-  let clusterId = 0;
-
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      if (doorPixels[y * w + x] === 1 && doorLabels[y * w + x] === -1) {
-        const pixels = [];
-        const queue = [[x, y]];
-        let head = 0;
-        doorLabels[y * w + x] = clusterId;
-        while (head < queue.length) {
-          const [cx, cy] = queue[head++];
-          pixels.push([cx, cy]);
-          for (const [ddx, ddy] of [[1,0],[-1,0],[0,1],[0,-1],[1,1],[-1,1],[1,-1],[-1,-1]]) {
-            const nx2 = cx + ddx;
-            const ny2 = cy + ddy;
-            if (nx2 >= 0 && nx2 < w && ny2 >= 0 && ny2 < h &&
-                doorPixels[ny2 * w + nx2] === 1 && doorLabels[ny2 * w + nx2] === -1) {
-              doorLabels[ny2 * w + nx2] = clusterId;
-              queue.push([nx2, ny2]);
-            }
-          }
-        }
-        clusters.push(pixels);
-        clusterId++;
-      }
-    }
-  }
-
-  // Step 3: For each cluster, compute bounding line segment (PCA-lite: just use min/max projection)
-  const doorRegions = [];
-  for (const pixels of clusters) {
-    if (pixels.length < 2) continue;
-
-    // Centroid
-    let cx = 0, cy = 0;
-    for (const [px, py] of pixels) { cx += px; cy += py; }
-    cx /= pixels.length;
-    cy /= pixels.length;
-
-    // Find principal axis via covariance
-    let cxx = 0, cyy = 0, cxy = 0;
-    for (const [px, py] of pixels) {
-      const dx = px - cx;
-      const dy = py - cy;
-      cxx += dx * dx;
-      cyy += dy * dy;
-      cxy += dx * dy;
-    }
-    const angle = 0.5 * Math.atan2(2 * cxy, cxx - cyy);
-    const ax = Math.cos(angle);
-    const ay = Math.sin(angle);
-
-    // Project all pixels onto principal axis to find extent
-    let minProj = Infinity, maxProj = -Infinity;
-    for (const [px, py] of pixels) {
-      const proj = (px - cx) * ax + (py - cy) * ay;
-      if (proj < minProj) minProj = proj;
-      if (proj > maxProj) maxProj = proj;
-    }
-
-    const lengthPx = maxProj - minProj;
-    const lengthM = lengthPx * PX_TO_METERS;
-
-    if (lengthM >= DOOR_MIN_WIDTH * 0.5 && lengthM <= DOOR_MAX_WIDTH * 1.5) {
-      doorRegions.push({
-        center: [cx * PX_TO_METERS, cy * PX_TO_METERS],
-        start: [(cx + ax * minProj) * PX_TO_METERS, (cy + ay * minProj) * PX_TO_METERS],
-        end: [(cx + ax * maxProj) * PX_TO_METERS, (cy + ay * maxProj) * PX_TO_METERS],
-        width: lengthM
-      });
-    }
-  }
-
-  return doorRegions;
-}
-
-function isThinWall(binary, w, h, x, y) {
-  // Check if wall at (x,y) is thin (≤5px) in any direction
-  const dirs = [[1, 0], [0, 1], [1, 1], [1, -1]];
-  for (const [dx, dy] of dirs) {
-    let thickness = 1;
-    for (let t = 1; t <= 6; t++) {
-      const nx = x + dx * t;
-      const ny = y + dy * t;
-      if (nx < 0 || nx >= w || ny < 0 || ny >= h || binary[ny * w + nx] !== 1) break;
-      thickness++;
-    }
-    for (let t = 1; t <= 6; t++) {
-      const nx = x - dx * t;
-      const ny = y - dy * t;
-      if (nx < 0 || nx >= w || ny < 0 || ny >= h || binary[ny * w + nx] !== 1) break;
-      thickness++;
-    }
-    if (thickness <= 5) return true;
-  }
-  return false;
-}
-
-function findDoorsOnEdge(wallStart, wallEnd, doorRegions) {
-  // Find which door regions project onto this wall edge
-  const edgeDx = wallEnd[0] - wallStart[0];
-  const edgeDy = wallEnd[1] - wallStart[1];
-  const edgeLen = Math.hypot(edgeDx, edgeDy);
+function classifyEdge(edgeStart, edgeEnd, binary, w, h) {
+  // Sample the original binary image along this polygon edge.
+  // Where there are wall pixels nearby → wall segment.
+  // Where there are no wall pixels nearby → door opening.
+  const edgeLen = Math.hypot(edgeEnd[0] - edgeStart[0], edgeEnd[1] - edgeStart[1]);
   if (edgeLen < 0.01) return [];
 
-  const ux = edgeDx / edgeLen;
-  const uy = edgeDy / edgeLen;
-  // Normal
+  const ux = (edgeEnd[0] - edgeStart[0]) / edgeLen;
+  const uy = (edgeEnd[1] - edgeStart[1]) / edgeLen;
+  // Normal (perpendicular into the wall)
   const nx = -uy;
   const ny = ux;
 
-  const doors = [];
-  const maxPerpendicularDist = 0.5; // meters — how close door center must be to wall line
+  // Sample every pixel along the edge
+  const stepM = PX_TO_METERS;
+  const steps = Math.max(Math.ceil(edgeLen / stepM), 2);
+  // How far perpendicular to search for wall pixels (in pixels)
+  const wallSearchPx = Math.ceil(0.4 / PX_TO_METERS); // 0.4m = 8px
 
-  for (const region of doorRegions) {
-    // Distance from door center to wall line
-    const toCenterX = region.center[0] - wallStart[0];
-    const toCenterY = region.center[1] - wallStart[1];
-    const perpDist = Math.abs(toCenterX * nx + toCenterY * ny);
+  const samples = []; // true = wall found, false = gap
+  for (let i = 0; i <= steps; i++) {
+    const t = (i / steps) * edgeLen;
+    const wx = edgeStart[0] + ux * t;
+    const wy = edgeStart[1] + uy * t;
+    const basePx = wx / PX_TO_METERS;
+    const basePy = wy / PX_TO_METERS;
 
-    if (perpDist > maxPerpendicularDist) continue;
-
-    // Project door endpoints onto edge
-    const projStart = (region.start[0] - wallStart[0]) * ux + (region.start[1] - wallStart[1]) * uy;
-    const projEnd = (region.end[0] - wallStart[0]) * ux + (region.end[1] - wallStart[1]) * uy;
-
-    const tMin = Math.max(0, Math.min(projStart, projEnd));
-    const tMax = Math.min(edgeLen, Math.max(projStart, projEnd));
-
-    if (tMax - tMin > DOOR_MIN_WIDTH * 0.5) {
-      doors.push({
-        start: [wallStart[0] + ux * tMin, wallStart[1] + uy * tMin],
-        end: [wallStart[0] + ux * tMax, wallStart[1] + uy * tMax],
-        width: tMax - tMin
-      });
+    // Search perpendicular to edge for wall pixels in original binary
+    let foundWall = false;
+    for (let d = -wallSearchPx; d <= wallSearchPx && !foundWall; d++) {
+      const px = Math.round(basePx + nx * d);
+      const py = Math.round(basePy + ny * d);
+      if (px >= 0 && px < w && py >= 0 && py < h && binary[py * w + px] === 1) {
+        foundWall = true;
+      }
     }
+    samples.push({ t, foundWall });
   }
 
-  return doors;
-}
-
-function splitWallAroundDoors(wallStart, wallEnd, doors) {
-  // Sort doors by distance from wall start
-  const edgeLen = Math.hypot(wallEnd[0] - wallStart[0], wallEnd[1] - wallStart[1]);
-  const edgeDx = (wallEnd[0] - wallStart[0]) / edgeLen;
-  const edgeDy = (wallEnd[1] - wallStart[1]) / edgeLen;
-
-  const sorted = doors.slice().sort((a, b) => {
-    const da = (a.start[0] - wallStart[0]) * edgeDx + (a.start[1] - wallStart[1]) * edgeDy;
-    const db = (b.start[0] - wallStart[0]) * edgeDx + (b.start[1] - wallStart[1]) * edgeDy;
-    return da - db;
-  });
-
+  // Split into contiguous wall and gap (door) runs
   const segments = [];
-  let current = wallStart;
+  let runStart = 0;
+  let runIsWall = samples[0].foundWall;
 
-  for (const door of sorted) {
-    // Wall segment before this door
-    const segLen = Math.hypot(door.start[0] - current[0], door.start[1] - current[1]);
-    if (segLen > 0.05) {
-      segments.push({ start: current, end: door.start });
+  for (let i = 1; i <= steps; i++) {
+    const isWall = i > steps ? !runIsWall : samples[i].foundWall; // force flush at end
+    if (isWall !== runIsWall || i > steps) {
+      const tStart = samples[runStart].t;
+      const tEnd = samples[i - 1].t;
+      const segLen = tEnd - tStart;
+      const start = [edgeStart[0] + ux * tStart, edgeStart[1] + uy * tStart];
+      const end = [edgeStart[0] + ux * tEnd, edgeStart[1] + uy * tEnd];
+
+      if (segLen > 0.05) {
+        if (!runIsWall && segLen >= DOOR_MIN_WIDTH * 0.5 && segLen <= DOOR_MAX_WIDTH * 2) {
+          segments.push({ type: 'door', start, end, width: segLen });
+        } else {
+          // If gap is too small or too large, treat as wall
+          segments.push({ type: 'wall', start, end });
+        }
+      }
+
+      runStart = i;
+      runIsWall = isWall;
     }
-    current = door.end;
   }
-
-  // Wall segment after last door
-  const remainLen = Math.hypot(wallEnd[0] - current[0], wallEnd[1] - current[1]);
-  if (remainLen > 0.05) {
-    segments.push({ start: current, end: wallEnd });
+  // Flush final run
+  if (runStart <= steps) {
+    const tStart = samples[runStart].t;
+    const tEnd = samples[steps].t;
+    const segLen = tEnd - tStart;
+    const start = [edgeStart[0] + ux * tStart, edgeStart[1] + uy * tStart];
+    const end = [edgeStart[0] + ux * tEnd, edgeStart[1] + uy * tEnd];
+    if (segLen > 0.05) {
+      if (!runIsWall && segLen >= DOOR_MIN_WIDTH * 0.5 && segLen <= DOOR_MAX_WIDTH * 2) {
+        segments.push({ type: 'door', start, end, width: segLen });
+      } else {
+        segments.push({ type: 'wall', start, end });
+      }
+    }
   }
 
   return segments;
